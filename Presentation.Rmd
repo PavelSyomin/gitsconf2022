@@ -1,0 +1,152 @@
+---
+title: "Как выбросы в воздух влияют на миграцию населения (и влияют ли)"
+output: powerpoint_presentation
+author: "Павел Сёмин"
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning = FALSE, message = FALSE)
+options(digits = 2)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+```
+
+```{r etl, include=FALSE}
+cities <- read_csv2("cities.csv", na = "NaN")
+eco <- read_csv2("eco.csv", na = "NaN", col_types = list("oktmo" = "c"))
+capitals <- read_csv("cnames.csv", col_select = 2:3, col_types = list("oktmo" = "c"))
+
+cities$oktmo <- sapply(cities$oktmo, function(x) {
+  first_letter <- substr(x, 1, 1)
+  start <- ifelse(first_letter == "0", 2, 1)
+  stop <- nchar(x) - 3
+  substr(x, start, stop)
+})
+capitals$is_capital = TRUE
+
+shift <- 3
+data <- select(cities, region:year, doctors_per10, living_space, population, wage) %>% 
+  left_join(eco %>%
+              filter(indicator == "Выброшено в атмосферу загрязняющих веществ, отходящих от стационарных источников – всего",
+                     zagr == "Всего (тыс. тонн с тремя знаками после запятой)",
+                     oktmo != "4729000") %>% 
+              select(oktmo, year, emissions = value),
+            by = c("oktmo", "year")) %>% 
+  left_join(select(cities, oktmo, year, migration, population) %>% 
+              mutate(year = year - shift,
+                     population = as.numeric(population),
+                     migration_per1000 = migration / population) %>% 
+              select(-population),
+            by = c("oktmo", "year")) %>%
+  left_join(select(capitals, -municipality), by = "oktmo") %>%
+  drop_na(emissions, migration, migration_per1000, wage, population, doctors_per10) %>% 
+  replace_na(list(is_capital = FALSE)) %>% 
+  mutate(emissions = as.numeric(emissions),
+         population = as.numeric(population),
+         wage = as.numeric(wage))
+
+emissions_1q <- quantile(data$emissions, 0.25)
+emissions_3q <- quantile(data$emissions, 0.75)
+emissions_iqr <- (emissions_3q - emissions_1q)
+data_filtered <- filter(data,
+       emissions > emissions_1q - 1.5 * emissions_iqr,
+       emissions < emissions_3q + 1.5 * emissions_iqr)
+
+migration_1q <- quantile(data$migration, 0.25)
+migration_3q <- quantile(data$migration, 0.75)
+migration_iqr <- (migration_3q - migration_1q)
+data_filtered <- filter(data_filtered,
+               migration > migration_1q - 1.5 * migration_iqr,
+               migration < migration_3q + 1.5 * migration_iqr)
+
+wage_1q <- quantile(data$wage, 0.25)
+wage_3q <- quantile(data$wage, 0.75)
+wage_iqr <- (wage_3q - wage_1q)
+data_filtered <- filter(data_filtered,
+               wage > wage_1q - 1.5 * wage_iqr,
+               wage < wage_3q + 1.5 * wage_iqr)
+
+population_1q <- quantile(data$population, 0.25)
+population_3q <- quantile(data$population, 0.75)
+population_iqr <- (population_3q - population_1q)
+data_filtered <- filter(data_filtered,
+               population > population_1q - 1.5 * population_iqr,
+               population < population_3q + 1.5 * population_iqr)
+```
+
+# Идея
+
+Наверное, выбросы в воздух влияют на миграцию: люди едут туда, где загрязнение меньше, и уезжают оттуда, где оно больше.
+
+Проблемы:
+
+* если эффект есть, то он небольшой — как оценить?
+* эффект замаскирован.
+
+Даже если ничего не выйдет, то надо попробовать.
+
+# Данные
+
+* БДМО Росстата.
+* Ещё один небольшой набор с социально-экономическими показателями по некоторым городам.
+
+# Переменные
+
+* Число жителей;
+* зарплата;
+* миграция (относительная: на 1000 человек); 
+* жилплощадь;
+* число врачей;
+* административный статус;
+* **выбросы**.
+
+# Методы
+
+1. Корреляция: выбросы ~ миграция.
+
+2. Линейная регрессия:
+
+* модель 1: миграция ~ всё, кроме выбросов;
+* модель 2: миграция ~ всё, включая выбросы;
+* модель 3: миграция ~ всё, кроме выбросов, с учётом взаимодействия;
+* модель 4: миграция ~ всё, включая выбросы, с учётом взаимодействия.
+
+# Результаты
+
+```{r corr_general_plot, fig.cap="Рис. 1. Связь между выбросами в атмосферный воздух и миграцией. Горизонтальная ось логарифмирована. Прямая — линейная аппроксимация.", fig.dim=c(6, 3)}
+plot1 <- ggplot(data_filtered, aes(log(emissions), migration_per1000)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  xlab("Выбросы в атмосферный воздух, тыс. тонн в год") + 
+  ylab("Миграция, человек на 1000 жителей в год")
+plot1
+```
+
+# Результаты
+
+* Коэффициент корреляции Спирмена: –0.12, p < 0.001.
+* R^2^ моделей регрессии, не учитывающих взаимодействие переменных: 0.04 (без выбросов) и 0.06 (с выбросами). Коэффициенты значимы.
+* R^2^ моделей регрессии, учитывающих взаимодействие переменных: 0.18 (без выбросов) и 0.27 (с выбросами). Коэффициенты не значимы.
+
+# По миллионникам
+
+```{r corr_1m_cities, fig.cap = "Рис. 2. Связь миграции и выбросов в атмосферный воздух в городах-миллионниках. Группы (кластеры) выделены по объёму выбросов, прямые — линейная аппроксимация", fig.dim=c(6, 3)}
+data_1msities <- filter(data, population > 1000)
+data_1msities$group <- as.factor(if_else(data_1msities$emissions < 75, 0, 1))
+plot2 <- ggplot(data_1msities, aes(emissions, migration_per1000, shape = group)) +
+  geom_point(size = 2) + 
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  xlab("Выбросы в воздух, тыс. тонн в год") + 
+  ylab("Миграция, человек на 1000 жителей в год") +
+  scale_shape_discrete(name = "Группа городов по выбросам",
+                       labels = c("<75000 тонн/год", ">75000 тонн/год")) + 
+  theme(legend.position = "top")
+plot2
+```
+
+# Выводы
+
+1. Коэффициенты корреляции/детерминации **очень маленькие**, но статистически значимые — связь есть, но очень и очень слабая.
+2. С городами-миллионниками связь есть, и довольно заметная, но, видимо, статистический артефакт.
